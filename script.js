@@ -85,6 +85,13 @@ document.addEventListener("DOMContentLoaded", () => {
     function initializeAudio() {
         if (audioContext) return;
 
+        // Browsers may silence Web Audio sources loaded from file://.
+        // Preserve direct HTMLAudioElement playback in that mode.
+        if (window.location.protocol === "file:") {
+            console.warn("YUME: file:// mode — use Live Server for music-reactive visualizer.");
+            return;
+        }
+
         const AudioContextClass =
             window.AudioContext ||
             window.webkitAudioContext;
@@ -252,6 +259,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         } catch (error) {
             console.error("Music playback error:", error);
+            alert("YUME couldn't play this song. Check that the MP3 exists in your music folder, or use LOAD to select a song.");
         }
     }
 
@@ -292,13 +300,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function nextTrack() {
-        // NEXT cycles through your permanent playlist.
-
-        if (playlist !== builtInPlaylist) {
-            playlist = builtInPlaylist;
-            currentTrackIndex = -1;
-        }
-
+        // Continue within the active playlist, including uploaded songs.
+        if (!playlist.length) return;
         loadTrack(currentTrackIndex + 1, true);
     }
 
@@ -555,35 +558,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
    
-function resize() {
-    const width = container.clientWidth || window.innerWidth;
-    const height = container.clientHeight || window.innerHeight;
-
-    camera.aspect = width / height;
-    camera.updateProjectionMatrix();
-
-    renderer.setSize(width, height, false);
-
-    const visibleHeight =
-        2 * Math.tan(
-            THREE.MathUtils.degToRad(camera.fov / 2)
-        ) * camera.position.z;
-
-    const visibleWidth = visibleHeight * camera.aspect;
-
-    // Doll size relative to the loading screen
-    const dollHeight = visibleHeight * 0.34;
-
-    // Approximate model height: 4.1 units
-    const scale = dollHeight / 4.1;
-
-    doll.scale.setScalar(scale);
-
-   // Center the doll inside the top-right panel
-doll.scale.setScalar(0.65);
-
-doll.position.set(0, 0.2, 0);
-}
 
     // ==========================================
     // 14 — FREQUENCY ENERGY
@@ -777,186 +751,99 @@ doll.position.set(0, 0.2, 0);
     // ==========================================
 
     const barCount = 60;
+    const spectrumLevels = new Float32Array(barCount);
 
-    const spectrumLevels =
-        new Float32Array(barCount);
+    function resizeCanvases() {
+        for (const canvas of [particleCanvas, spectrumCanvas]) {
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height) continue;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const width = Math.max(1, Math.round(rect.width * dpr));
+            const height = Math.max(1, Math.round(rect.height * dpr));
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+            }
+        }
+    }
+
+    window.addEventListener("resize", resizeCanvases);
+    if (typeof ResizeObserver !== "undefined") {
+        const observer = new ResizeObserver(resizeCanvases);
+        observer.observe(particleCanvas);
+        observer.observe(spectrumCanvas);
+    }
+    resizeCanvases();
+
+    // Keep a visible emerald line even before music starts.
+    // When paused, retain the last drawn shape exactly.
+    let spectrumHasPlayed = false;
+    for (let i = 0; i < barCount; i++) {
+        const center = (barCount - 1) / 2;
+        spectrumLevels[i] = 0.10 + 0.16 * Math.exp(-Math.pow((i - center) / 13, 2))
+            + 0.035 * Math.sin(i * 0.75) ** 2;
+    }
 
     function drawSpectrum() {
         const width = spectrumCanvas.width;
         const height = spectrumCanvas.height;
-
-        spectrumCtx.clearRect(
-            0,
-            0,
-            width,
-            height
-        );
-
         if (!width || !height) return;
 
-        const playing = Boolean(
-            analyser &&
-            frequencyData &&
-            !audio.paused &&
-            !audio.ended
-        );
+        spectrumCtx.clearRect(0, 0, width, height);
+        const playing = !audio.paused && !audio.ended && audio.readyState >= 2;
+        const left = width * 0.045;
+        const bottom = height * 0.12;
+        const plotWidth = width - left * 2;
+        const plotHeight = height * 0.76;
+        const baseline = height - bottom;
+        const slot = plotWidth / barCount;
+        const barWidth = Math.max(1, slot * 0.78);
 
-        const barWidth = width / barCount;
-
-        const gap = Math.max(
-            1,
-            barWidth * 0.12
-        );
-
-        const usableHeight = height * 0.78;
-
-        spectrumCtx.fillStyle = "#818b85";
-
-        spectrumCtx.font = `${
-            Math.max(
-                6,
-                Math.min(11, width / 90)
-            )
-        }px monospace`;
-
-        // Frequency labels
-
-        for (let i = 0; i < barCount; i++) {
-            const label = (
-                (i * 37 + 125) % 256
-            ).toString(16)
-             .padStart(2, "0")
-             .toUpperCase();
-
-            spectrumCtx.save();
-
-            spectrumCtx.translate(
-                i * barWidth + barWidth / 2,
-                3
-            );
-
-            spectrumCtx.rotate(Math.PI / 2);
-            spectrumCtx.fillText(label, 0, 0);
-            spectrumCtx.restore();
-        }
-
-        // Reactive green bars
-
-        for (let i = 0; i < barCount; i++) {
-            const fraction =
-                i / (barCount - 1);
-
-            const idle =
-                0.13 +
-                0.27 * Math.exp(
-                    -Math.pow(
-                        (i - 25) / 18,
-                        2
-                    )
-                ) +
-                0.035 * Math.sin(
-                    animationTime * 0.045 +
-                    i * 0.7
-                );
-
-            let amplitude =
-                Math.max(0.08, idle);
-
-            if (playing) {
-                const frequency =
-                    35 * Math.pow(
-                        14000 / 35,
-                        fraction
-                    );
-
-                const bin = Math.min(
-                    frequencyData.length - 1,
-                    Math.round(
-                        frequency *
-                        analyser.fftSize /
-                        audioContext.sampleRate
-                    )
-                );
-
-                let total = 0;
-                let count = 0;
-
-                for (
-                    let offset = -2;
-                    offset <= 2;
-                    offset++
-                ) {
-                    const index = Math.max(
-                        0,
-                        Math.min(
-                            frequencyData.length - 1,
-                            bin + offset
-                        )
-                    );
-
-                    total += frequencyData[index];
-                    count++;
+        if (playing) {
+            spectrumHasPlayed = true;
+            const t = audio.currentTime;
+            for (let i = 0; i < barCount; i++) {
+                let amplitude;
+                if (analyser && frequencyData && audioContext) {
+                    const fraction = i / (barCount - 1);
+                    const hz = 40 * Math.pow(14000 / 40, fraction);
+                    const bin = Math.min(frequencyData.length - 1,
+                        Math.round(hz * analyser.fftSize / audioContext.sampleRate));
+                    let total = 0;
+                    for (let j = -2; j <= 2; j++) {
+                        const idx = Math.max(0, Math.min(frequencyData.length - 1, bin + j));
+                        total += frequencyData[idx];
+                    }
+                    amplitude = 0.08 + Math.pow(total / (5 * 255), 0.72) * 0.84;
+                } else {
+                    // file:// visual fallback; true audio response requires Live Server.
+                    amplitude = 0.13 + 0.22 * Math.sin(i * 0.27 + t * 4) ** 2
+                        + 0.28 * Math.sin(i * 0.54 - t * 7) ** 4;
                 }
-
-                const energy =
-                    total / count / 255;
-
-                amplitude = Math.max(
-                    0.09,
-                    Math.pow(
-                        energy,
-                        0.65
-                    ) * 1.6
-                );
+                spectrumLevels[i] += (Math.min(0.95, amplitude) - spectrumLevels[i]) * 0.32;
             }
-
-            amplitude = Math.min(1, amplitude);
-
-            const speed =
-                amplitude > spectrumLevels[i]
-                    ? 0.48
-                    : 0.14;
-
-            spectrumLevels[i] += (
-                amplitude -
-                spectrumLevels[i]
-            ) * speed;
-
-            const barHeight = Math.max(
-                3,
-                spectrumLevels[i] *
-                usableHeight
-            );
-
-            const x = i * barWidth;
-            const y = height - barHeight;
-
-            spectrumCtx.fillStyle = "#00f59a";
-
-            spectrumCtx.fillRect(
-                x,
-                y,
-                Math.max(
-                    1,
-                    barWidth - gap
-                ),
-                barHeight
-            );
-
-            spectrumCtx.fillStyle =
-                "rgba(235,255,245,0.85)";
-
-            spectrumCtx.fillRect(
-                x + barWidth - gap / 2,
-                y,
-                Math.max(
-                    0.6,
-                    width / 900
-                ),
-                barHeight
-            );
         }
+
+        // Neon baseline stays visible, including when paused.
+        spectrumCtx.save();
+        spectrumCtx.strokeStyle = "#20ff9e";
+        spectrumCtx.lineWidth = Math.max(1.5, height * 0.012);
+        spectrumCtx.shadowColor = "#00f59a";
+        spectrumCtx.shadowBlur = Math.max(4, width / 65);
+        spectrumCtx.beginPath();
+        spectrumCtx.moveTo(left, baseline);
+        spectrumCtx.lineTo(width - left, baseline);
+        spectrumCtx.stroke();
+
+        for (let i = 0; i < barCount; i++) {
+            const barHeight = Math.max(4, spectrumLevels[i] * plotHeight);
+            const x = left + i * slot + (slot - barWidth) / 2;
+            spectrumCtx.fillStyle = "#12ff9b";
+            spectrumCtx.fillRect(x, baseline - barHeight, barWidth, barHeight);
+        }
+        spectrumCtx.restore();
     }
+
 
     // ==========================================
     // 17 — ANIMATION LOOP
@@ -1104,7 +991,7 @@ doll.position.set(0, 0.2, 0);
 
             setTimeout(() => {
                 loadingScreen.remove();
-               // resizeCanvases();
+                resizeCanvases();
             }, 1100);
 
         }, 350);
